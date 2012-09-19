@@ -1,151 +1,32 @@
 # -*- coding: utf-8 -*- 
 
-import os
-import sys
+from core import *
 import xbmc
-import urllib
-import struct
-import xbmcvfs
-import xmlrpclib
-
-__scriptname__ = sys.modules[ "__main__" ].__scriptname__
-
-BASE_URL_XMLRPC = u"http://api.opensubtitles.org/xml-rpc"
-
-
-class OSDBServer:
-
-  def __init__( self, *args, **kwargs ):
-    self.server = xmlrpclib.Server( BASE_URL_XMLRPC, verbose=0 )
-    login = self.server.LogIn("", "", "en", __scriptname__.replace(" ","_"))    
-    self.osdb_token  = login[ "token" ]
-
-  def mergesubtitles( self ):
-    self.subtitles_list = []
-    if( len ( self.subtitles_hash_list ) > 0 ):
-      for item in self.subtitles_hash_list:
-        if item["format"].find( "srt" ) == 0 or item["format"].find( "sub" ) == 0:
-          self.subtitles_list.append( item )
-
-    if( len ( self.subtitles_list ) > 0 ):
-      self.subtitles_list.sort(key=lambda x: [not x['sync'],x['lang_index']])
-
-  def searchsubtitles( self, srch_string, languages, hash_search, _hash = "000000000", size = "000000000"):
-    msg                      = ""
-    lang_index               = 3
-    searchlist               = []
-    self.subtitles_hash_list = []
-  
-    log( __name__ ,"Token:[%s]" % str(self.osdb_token))
-  
-    try:
-      if ( self.osdb_token ) :
-        if hash_search:
-          searchlist.append({'sublanguageid':','.join(languages), 'moviehash':_hash, 'moviebytesize':str( size ) })
-        searchlist.append({'sublanguageid':','.join(languages), 'query':srch_string })
-        search = self.server.SearchSubtitles( self.osdb_token, searchlist )
-        if search["data"]:
-          for item in search["data"]:
-            if item["ISO639"]:
-              lang_index=0
-              for user_lang_id in languages:
-                if user_lang_id == item["ISO639"]:
-                  break
-                lang_index+=1
-              flag_image = "flags/%s.gif" % item["ISO639"]
-            else:                                
-              flag_image = "-.gif"
-
-            if str(item["MatchedBy"]) == "moviehash":
-              sync = True
-            else:                                
-              sync = False
-
-            self.subtitles_hash_list.append({'lang_index'    : lang_index,
-                                             'filename'      : item["SubFileName"],
-                                             'link'          : item["ZipDownloadLink"],
-                                             'language_name' : item["LanguageName"],
-                                             'language_flag' : flag_image,
-                                             'language_id'   : item["SubLanguageID"],
-                                             'ID'            : item["IDSubtitleFile"],
-                                             'rating'        : str(int(item["SubRating"][0])),
-                                             'format'        : item["SubFormat"],
-                                             'sync'          : sync,
-                                             'hearing_imp'   : int(item["SubHearingImpaired"]) != 0
-                                             })
-            
-    except:
-      msg = "Error Searching For Subs"
-    
-    self.mergesubtitles()
-    return self.subtitles_list, msg
-
-  def download(self, ID, dest):
-     try:
-       import zlib, base64
-       down_id=[ID,]
-       result = self.server.DownloadSubtitles(self.osdb_token, down_id)
-       if result["data"]:
-         local_file = open(dest, "w" + "b")
-         d = zlib.decompressobj(16+zlib.MAX_WBITS)
-         data = d.decompress(base64.b64decode(result["data"][0]["data"]))
-         local_file.write(data)
-         local_file.close()
-         return True
-       return False
-     except:
-       return False
-
-def log(module, msg):
-  xbmc.log((u"### [%s] - %s" % (module,msg,)).encode('utf-8'),level=xbmc.LOGDEBUG ) 
-
-def hashFile(file_path):
-    longlongformat = 'q'  # long long
-    bytesize = struct.calcsize(longlongformat)
-    f = xbmcvfs.File(file_path)
-    
-    filesize = f.size()
-    hash = filesize
-    
-    if filesize < 65536 * 2:
-        return "SizeError"
-    
-    buffer = f.read(65536)
-    f.seek(max(0,filesize-65536),0)
-    buffer += f.read(65536)
-    f.close()
-    for x in range((65536/bytesize)*2):
-        size = x*bytesize
-        (l_value,)= struct.unpack(longlongformat, buffer[size:size+bytesize])
-        hash += l_value
-        hash = hash & 0xFFFFFFFFFFFFFFFF
-    
-    returnHash = "%016x" % hash
-    return filesize,returnHash
-
-
-######## Standard Search function ###########
-# 'item' has everything thats needed for search parameters, look in script.subtitles.main/gui.py for detailed info
-# below list might be incomplete
-#
-#    item['file_original_path']
-#    item['year']
-#    item['season']
-#    item['episode']
-#    item['tvshow']
-#    item['title']
-# anything needed for download can be saved here and later retreived in 'download_subtitles' function
-#############################################
 
 def search_subtitles( item ):
-  ok = False
+  """ Searchs for subtitles and returns list of found subtitles.
+  
+  --> item: Its a dictionary containing all needed information about the media we are serching subtitles for (, look in script.subtitles.main/gui.py for detailed info).
+            It includes, at least, the following keys filled on entry:
+            'file_original_path':(str)  Complete path of media file (utf-8 encoded). Please be advise to decode or convert to local filesystem encoding if needed.
+            'year':(str) Only for movies. Year of Release.
+            'season':(str) Only for tv episodes. Season of the episode
+            'episode':(str) Only for tv episodes. Eposode number within the season indicated by 'season'.
+            'tvshow':(str) Only for tv episodes. Name of the TV Show
+            'title':(str) Name of the movie or tv episode
+            Other might be useful entries:
+            'temp':(str) Indicates that subtitles will be stored in a temporary place (when video is streamed).
+  On exit search_subtitles can add entries to the item dictionary (service dependant) so the might be found by download_subtitles
+  """
+
+ok = False
   hash_search = False
-  if len(item['tvshow']) > 0:                                            # TvShow
+  if len(item['tvshow']) > 0:                                            # It's a TvShow episode
     OS_search_string = ("%s S%.2dE%.2d" % (item['tvshow'],
                                            int(item['season']),
                                            int(item['episode']),)
                                           ).replace(" ","+")      
-  else:
+  else:                                                                  #If it's not a TV show its a movie
     if str(item['year']) == "":
       item['title'], item['year'] = xbmc.getCleanMovieTitle( item['title'] )
 
@@ -153,11 +34,11 @@ def search_subtitles( item ):
     
   log( __name__ , "Search String [ %s ]" % (OS_search_string,))     
  
-  if item['temp'] : 
+  if item['temp'] :                        #For streamed files we can't do a Hash Search
     hash_search = False
     file_size   = "000000000"
     SubHash     = "000000000000"
-  else:
+  else:                                    #else we calculate and store the hash info
     try:
       file_size, SubHash   = hashFile(item['file_original_path'])
       log( __name__ ,"xbmc module hash and size")
